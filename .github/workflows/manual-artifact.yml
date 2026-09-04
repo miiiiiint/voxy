@@ -1,8 +1,10 @@
 name: manual-artifact
-on: [ workflow_dispatch ]
+on: [workflow_dispatch]
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -19,15 +21,53 @@ jobs:
           cache-read-only: false
           cache-cleanup: always
 
-      - name: Gradle build
-        run: ./gradlew build
+      - name: Build
+        run: ./gradlew clean build remapJar --stacktrace
 
-      - name: Debug check jars
-        run: find . -path "*/build/libs/*.jar"
+      - name: Debug - list all jars
+        run: |
+          echo "workspace=$GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -type f -path "*/build/libs/*.jar" -print | sort
+
+      - name: Collect publishable jar (prefer remapped)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+          # 1) 优先收集 remapped / release 候选
+          mapfile -t preferred < <(find . -type f -path "*/build/libs/*.jar" \
+            \( -name "*-remapped.jar" -o -name "*-release.jar" -o -name "*-all.jar" \) \
+            ! -name "*-dev.jar" \
+            ! -name "*-sources.jar" \
+            ! -name "*-javadoc.jar" | sort)
+
+          # 2) 若没有，再回退到普通 jar（仍排除非发布件）
+          if [ ${#preferred[@]} -eq 0 ]; then
+            mapfile -t fallback < <(find . -type f -path "*/build/libs/*.jar" \
+              ! -name "*-dev.jar" \
+              ! -name "*-sources.jar" \
+              ! -name "*-javadoc.jar" | sort)
+            preferred=("${fallback[@]}")
+          fi
+
+          # 3) 必须至少有一个
+          if [ ${#preferred[@]} -eq 0 ]; then
+            echo "No publishable jar found."
+            exit 1
+          fi
+
+          # 4) 多模块时可能多个，这里全部复制上传
+          for f in "${preferred[@]}"; do
+            cp "$f" artifacts/
+          done
+
+          echo "Collected publishable jars:"
+          ls -lah artifacts
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: voxy-artifacts
-          path: "**/build/libs/*.jar"
+          path: artifacts/*.jar
           if-no-files-found: error
